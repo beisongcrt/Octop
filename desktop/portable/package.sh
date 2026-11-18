@@ -9,6 +9,7 @@
 #   bash desktop/portable/package.sh                # host platform (online install)
 #   bash desktop/portable/package.sh darwin-arm64
 #   OCTOP_GREEN_OFFLINE=1 bash desktop/portable/package.sh   # require local wheels
+#   OCTOP_FEISHU_GATEWAY_SOURCE=/path/to/octop-gateway bash desktop/portable/package.sh windows-amd64
 #
 # Layout of each zip:
 #   Octop-<plat>/
@@ -49,6 +50,39 @@ build_octop_wheel() {
   # stdout: wheel path only (captured by caller)
   echo "$whl"
 }
+
+install_feishu_gateway() (
+  local plat="$1"
+  local staging="$2"
+  local source="$3"
+  shift 3
+
+  command -v go >/dev/null || { echo "[package] Go is required for the Feishu worker" >&2; exit 1; }
+  source="$(cd "$source" && pwd)"
+  local worker_source="${source}/workers/feishu-ws"
+  if [[ ! -f "${worker_source}/go.mod" || ! -f "${worker_source}/go.sum" ]]; then
+    echo "[package] OCTOP_FEISHU_GATEWAY_SOURCE must point to the Feishu recovery checkout" >&2
+    exit 1
+  fi
+
+  local output
+  output="$(mktemp -d "${GREEN_ROOT}/feishu-gateway.XXXXXX")"
+  trap 'rm -f -- "$output"/octop_gateway-*.whl "$output"/.gitignore; rmdir -- "$output"' EXIT
+  uv build --wheel --out-dir "$output" "$source"
+  local wheels=("$output"/octop_gateway-*.whl)
+  if [[ ${#wheels[@]} -ne 1 || ! -f "${wheels[0]}" ]]; then
+    echo "[package] expected one octop-gateway wheel" >&2
+    exit 1
+  fi
+  uv pip install "$@" --no-deps --reinstall "${wheels[0]}"
+
+  local worker="${staging}/packages/octop_gateway/bin/feishu-ws.exe"
+  mkdir -p "$(dirname "$worker")"
+  cd "$worker_source"
+  GOOS=windows GOARCH="${plat#windows-}" CGO_ENABLED=0 \
+    go build -mod=readonly -trimpath -o "$worker" .
+  test -s "$worker"
+)
 
 wheel_cache_usable() {
   local wheel_dir="$1"
@@ -245,6 +279,10 @@ assemble_one() {
   cp "${TEMPLATES}/launch.py" "${staging}/launch.py"
   cp "${TEMPLATES}/README.txt" "${staging}/README.txt"
   chmod +x "${staging}/start.sh"
+
+  if [[ "$plat" == windows-* && -n "${OCTOP_FEISHU_GATEWAY_SOURCE:-}" ]]; then
+    install_feishu_gateway "$plat" "$staging" "$OCTOP_FEISHU_GATEWAY_SOURCE" "${common_args[@]}"
+  fi
 
   # Windows: pywin32 DLLs must be findable next to python.exe (or on PATH).
   # --target installs leave them under packages/pywin32_system32 only.
